@@ -43,7 +43,7 @@ import tempfile
 # #######################################################################################################################
 
 def video_to_frames(video, directory, force, orange_file, multiple, find_viewport, viewport_time, full_resolution,
-                    timeline_file, trim_end):
+                    timeline_file, trim_end,zones_pos):
     first_frame = os.path.join(directory, 'ms_000000')
     if (not os.path.isfile(first_frame + '.png') and not os.path.isfile(first_frame + '.jpg')) or force:
         if os.path.isfile(video):
@@ -68,6 +68,8 @@ def video_to_frames(video, directory, force, orange_file, multiple, find_viewpor
                         adjust_frame_times(dir)
                         if timeline_file is not None and not multiple:
                             synchronize_to_timeline(dir, timeline_file)
+                        if zones_pos:
+                            heatmap_mask_frames(dir, zones_pos,viewport)
                         eliminate_duplicate_frames(dir)
                 else:
                     logging.critical("Error extracting the video frames from " + video)
@@ -291,6 +293,40 @@ def adjust_frame_times(directory):
                 new_time = frame_time - offset
                 dest = os.path.join(directory, 'ms_{0:06d}.png'.format(new_time))
                 os.rename(frame, dest)
+
+########################################################################################################################
+#   Heatmap Masking
+########################################################################################################################
+
+def heatmap_mask_frames(directory, zones_pos,viewport):
+    try:
+        # Do a first pass looking for the first non-blank frame with an allowance
+        # for up to a 2% per-pixel difference for noise in the white field.
+        files = sorted(glob.glob(os.path.join(directory, 'ms_*.png')))
+        count = len(files)
+        rect_str = ""
+
+        for i in range(0, len(zones_pos)):
+            rect_str += "-draw 'rectangle " + str(zones_pos[i][0]['x1']) + "," + str(zones_pos[i][1]['y1']) + " " + str(zones_pos[i][2]['x2']) + "," + str(zones_pos[i][3]['y2']) + "' "
+
+        command = ('convert -size {0}x{1} xc:none -fill steelblue {2} mask.png').format(viewport['width'],viewport['height'], rect_str)
+        mask = subprocess.Popen(command, stderr=subprocess.PIPE, shell=True)
+        out, err = mask.communicate()
+
+        command = ('convert mask.png -alpha extract mask_extracted.png')
+        maskextract = subprocess.Popen(command, stderr=subprocess.PIPE, shell=True)
+        out, err = maskextract.communicate()
+
+
+        for i in range(1, count):
+                command = ('convert {0} mask_extracted.png -alpha off -compose multiply -composite {0}').format(files[i])
+                masking = subprocess.Popen(command, stderr=subprocess.PIPE, shell=True)
+                out, err = masking.communicate()
+                if err:
+                    print(err)
+
+    except:
+        logging.exception('Error masking frames for heatmap')
 
 
 def eliminate_duplicate_frames(directory):
@@ -826,7 +862,7 @@ def calculate_perceptual_speed_index(progress, directory):
     first_paint_frame = os.path.join(dir, "ms_{0:06d}.png".format(progress[1]["time"]))
     target_frame = os.path.join(dir, "ms_{0:06d}.png".format(progress[x - 1]["time"]))
     ssim_1 = compute_ssim(first_paint_frame, target_frame)
-    per_si = float(progress[1]['time'] ) 
+    per_si = float(progress[1]['time'] )
     last_ms = progress[1]['time']
     # Full Path of the Target Frame
     logging.debug("Target image for perSI is %s" % target_frame)
@@ -905,6 +941,14 @@ def check_process(command, output):
     return ok
 
 
+
+# #######################################################################################################################
+# Test json
+# #######################################################################################################################
+
+selector_boundaries = '{"viewport_width":1264,"scrollbar_width":17,"zones":[{"slug":"basic","name":"Basic branding","boundaries":[{"left":98,"top":174,"right":590,"bottom":514}]},{"slug":"menu","name":"menu","boundaries":[{"left":6,"top":30,"right":389,"bottom":58}]}]}'
+
+
 ########################################################################################################################
 #   Main Entry Point
 ########################################################################################################################
@@ -956,6 +1000,7 @@ def main():
                         help="Calculate perceptual Speed Index")
     parser.add_argument('-j', '--json', action='store_true', default=False,
                         help="Set output format to JSON")
+    parser.add_argument('--heatmap', action='store_true', default=False, help="Turn on heatmap feature")
 
     options = parser.parse_args()
 
@@ -975,6 +1020,23 @@ def main():
         histogram_file = options.histogram
     else:
         histogram_file = os.path.join(temp_dir, 'histograms.json.gz')
+
+    # Parse json data for heatmap
+    zones_pos = []
+    if options.heatmap:
+        selector=json.loads(selector_boundaries)
+        i = 0
+
+        while i < len(selector['zones']):
+            zone_boundaries = selector['zones'][i]['boundaries']
+            j = 0
+            while j< len(zone_boundaries):
+                zones_pos.append([{'x1':zone_boundaries[j]['left']}, {'y1': zone_boundaries[j]['top']},
+                {'x2': zone_boundaries[j]['right']},
+                {'y2': zone_boundaries[j]['bottom']}])
+
+                j = j + 1
+            i = i + 1
 
 
     # Set up logging
@@ -1005,7 +1067,7 @@ def main():
                     orange_file = os.path.join(temp_dir, 'orange.png')
                     generate_orange_png(orange_file)
                 video_to_frames(options.video, directory, options.force, orange_file, options.multiple,
-                                options.viewport, options.viewporttime, options.full, options.timeline, options.trimend)
+                                options.viewport, options.viewporttime, options.full, options.timeline, options.trimend,zones_pos)
             if not options.multiple:
                 calculate_histograms(directory, histogram_file, options.force)
                 metrics = calculate_visual_metrics(histogram_file, options.start, options.end, options.perceptual,
